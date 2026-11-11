@@ -1,0 +1,107 @@
+# VitalComm — CI pipeline
+# Stages: lint → build → analyse → test → sanitize → coverage
+
+stages:
+  - lint
+  - build
+  - analyse
+  - test
+  - sanitize
+  - coverage
+
+default:
+  image: ubuntu:22.04
+  before_script:
+    - apt-get update -qq
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y -qq
+        build-essential cmake ninja-build git
+        clang-15 clang-tidy-15 clang-format-15 cppcheck
+        libstdc++-12-dev gcovr lcov ca-certificates
+
+# ---------- lint ----------
+clang-format:
+  stage: lint
+  script:
+    - find include src tests examples -regex '.*\.\(cpp\|hpp\)' -print0
+        | xargs -0 clang-format-15 --dry-run --Werror
+
+# ---------- build ----------
+.build-template: &build
+  stage: build
+  script:
+    - cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE
+        -DCMAKE_CXX_COMPILER=$CXX
+    - cmake --build build -- -k 0
+  artifacts:
+    paths:
+      - build/
+    expire_in: 1 hour
+
+build:gcc-release:
+  <<: *build
+  variables: { BUILD_TYPE: Release, CXX: g++ }
+
+build:clang-debug:
+  <<: *build
+  variables: { BUILD_TYPE: Debug, CXX: clang++-15 }
+
+# ---------- analyse ----------
+clang-tidy:
+  stage: analyse
+  needs: ["build:clang-debug"]
+  script:
+    - run-clang-tidy-15 -p build-clang-debug -quiet
+        -header-filter='include/vitalcomm/.*' 'include|src' || true
+
+cppcheck:
+  stage: analyse
+  needs: []
+  script:
+    - cppcheck --enable=warning,style,performance,portability
+        --inline-suppr --error-exitcode=1 --std=c++17 -I include src
+
+# ---------- test ----------
+test:gcc:
+  stage: test
+  needs: ["build:gcc-release"]
+  script:
+    - ctest --test-dir build --output-on-failure
+
+# ---------- sanitize ----------
+.sanitize-template: &sanitize
+  stage: sanitize
+  needs: []
+  script:
+    - cmake -S . -B build-$SAN -G Ninja -DCMAKE_BUILD_TYPE=Debug
+        -DCMAKE_CXX_COMPILER=clang++-15
+        -DVITALCOMM_SANITIZE=$SAN
+    - cmake --build build-$SAN
+    - ctest --test-dir build-$SAN --output-on-failure
+
+sanitize:asan:
+  <<: *sanitize
+  variables: { SAN: "address,undefined" }
+
+sanitize:tsan:
+  <<: *sanitize
+  variables: { SAN: "thread" }
+
+# ---------- coverage ----------
+coverage:
+  stage: coverage
+  needs: []
+  script:
+    - cmake -S . -B build-cov -G Ninja -DCMAKE_BUILD_TYPE=Debug
+        -DCMAKE_CXX_FLAGS="--coverage -O0 -g"
+        -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+    - cmake --build build-cov
+    - ctest --test-dir build-cov --output-on-failure
+    - gcovr --root . --filter 'include/vitalcomm/' --filter 'src/'
+        --xml-pretty -o coverage.xml
+        --print-summary
+  coverage: '/lines:\s*\d+\.\d+/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml

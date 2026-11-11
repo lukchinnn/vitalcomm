@@ -1,0 +1,2 @@
+add_executable(crc32_demo crc32_demo.cpp)
+target_link_libraries(crc32_demo PRIVATE vitalcomm vitalcomm_warnings)
